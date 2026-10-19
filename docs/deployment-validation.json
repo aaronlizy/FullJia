@@ -1,0 +1,42 @@
+{
+  "validatedAt": "2026-09-30T09:00:00Z",
+  "awsAccountId": "893420598334",
+  "region": "ap-southeast-1",
+  "stackName": "fullja-cloudguard-demo",
+  "stackStatus": "UPDATE_COMPLETE",
+  "runtimeMode": "hybrid",
+  "apiUrl": "https://0pdsacieja.execute-api.ap-southeast-1.amazonaws.com/prod/api",
+  "cognitoDomain": "https://fullja-cloudguard-893420598334-v2.auth.ap-southeast-1.amazoncognito.com",
+  "cloudFrontUrl": "https://d15aa7dmkhmjnf.cloudfront.net",
+  "checks": {
+    "samValidateLint": "passed",
+    "samBuild": "passed",
+    "cloudFormationDeployment": "passed",
+    "fiveGovernanceActions": "passed",
+    "rotateKeysDurationSeconds": 17.934,
+    "scheduledCollector": "passed",
+    "cognitoAuthorizerUnauthenticatedStatus": 401,
+    "wafAssociation": "passed",
+    "sqsFindingIngest": "passed",
+    "highSeveritySnsPublish": "passed",
+    "dynamodbPersistence": "passed",
+    "evidenceObjectVersions": 7,
+    "evidenceEncryption": "aws:kms",
+    "evidenceSha256Verification": "passed",
+    "api5xxAlarm": "OK",
+    "dlqFailureIsolationAndAlarm": "passed"
+  },
+  "observedCloudData": {
+    "iamUsers": 14,
+    "kmsKeysInspected": 30,
+    "s3BucketsSampled": 100,
+    "configRulesReturned": 0,
+    "cloudFormationResources": 40
+  },
+  "notes": [
+    "AWS Config returned zero rules in the target region; local demo rules are not reported as live AWS results.",
+    "auto_remediate creates approval_required work orders and does not modify customer resources.",
+    "The malformed DLQ smoke message was deleted after alarm validation; the successful SMOKE_TEST finding was retained as an audit record.",
+    "An unused rollback KMS key is scheduled for deletion on 2026-10-07T16:01:36.092+08:00."
+  ]
+}

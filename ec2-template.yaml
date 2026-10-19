@@ -1,0 +1,343 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Fullja CloudGuard EC2 origin with 90-day backup and rapid rollback
+
+Parameters:
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+  SubnetId:
+    Type: AWS::EC2::Subnet::Id
+  AmiId:
+    Type: AWS::EC2::Image::Id
+  InstanceType:
+    Type: String
+    Default: t4g.nano
+    AllowedValues: [t4g.nano, t4g.micro]
+  ArtifactBucket:
+    Type: String
+  ArtifactKey:
+    Type: String
+  ReleaseId:
+    Type: String
+  BackupBucketName:
+    Type: String
+  Owner:
+    Type: String
+    Default: lizeyang@bosicloud.com
+  Project:
+    Type: String
+    Default: FulljaCloudGuard
+
+Resources:
+  InstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Policies:
+        - PolicyName: CloudGuardArtifactAndBackupAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: s3:GetObject
+                Resource: !Sub arn:${AWS::Partition}:s3:::${ArtifactBucket}/ec2/*
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                  - s3:PutObject
+                  - s3:ListBucket
+                  - s3:ListBucketVersions
+                Resource:
+                  - !Sub arn:${AWS::Partition}:s3:::${BackupBucketName}
+                  - !Sub arn:${AWS::Partition}:s3:::${BackupBucketName}/*
+      Tags:
+        - Key: Owner
+          Value: !Ref Owner
+        - Key: Project
+          Value: !Ref Project
+
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles: [!Ref InstanceRole]
+
+  OriginSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Public HTTP and HTTPS origin access requested for CloudGuard test
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+          Description: Public HTTP origin
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+          Description: Public HTTPS origin
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: fullja-cloudguard-origin
+        - Key: Owner
+          Value: !Ref Owner
+        - Key: Project
+          Value: !Ref Project
+
+  OriginInstance:
+    Type: AWS::EC2::Instance
+    CreationPolicy:
+      ResourceSignal:
+        Count: 1
+        Timeout: PT15M
+    Properties:
+      ImageId: !Ref AmiId
+      InstanceType: !Ref InstanceType
+      IamInstanceProfile: !Ref InstanceProfile
+      SubnetId: !Ref SubnetId
+      SecurityGroupIds: [!Ref OriginSecurityGroup]
+      SourceDestCheck: true
+      InstanceInitiatedShutdownBehavior: stop
+      Monitoring: false
+      PropagateTagsToVolumeOnCreation: true
+      CreditSpecification:
+        CPUCredits: standard
+      MetadataOptions:
+        HttpEndpoint: enabled
+        HttpTokens: required
+        HttpPutResponseHopLimit: 1
+        InstanceMetadataTags: enabled
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeType: gp3
+            VolumeSize: 8
+            Encrypted: true
+            DeleteOnTermination: true
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -euo pipefail
+          exec > >(tee /var/log/fullja-bootstrap.log | logger -t fullja-bootstrap -s 2>/dev/console) 2>&1
+          dd if=/dev/zero of=/swapfile bs=1M count=1024 status=none
+          chmod 600 /swapfile
+          mkswap /swapfile
+          swapon /swapfile
+          echo '/swapfile swap swap defaults 0 0' >> /etc/fstab
+          dnf install -y nginx nodejs npm unzip openssl aws-cfn-bootstrap
+          useradd --system --home /opt/fullja --shell /sbin/nologin fullja || true
+          mkdir -p /opt/fullja/releases/${ReleaseId} /var/lib/fullja /etc/fullja
+          aws s3 cp s3://${ArtifactBucket}/${ArtifactKey} /tmp/fullja-release.zip
+          unzip -q /tmp/fullja-release.zip -d /opt/fullja/releases/${ReleaseId}
+          if [ ! -f /var/lib/fullja/store.json ]; then
+            cp /opt/fullja/releases/${ReleaseId}/data/store.json /var/lib/fullja/store.json
+          fi
+          rm -rf /opt/fullja/releases/${ReleaseId}/data
+          ln -sfn /opt/fullja/releases/${ReleaseId} /opt/fullja/current
+          chown -R fullja:fullja /opt/fullja /var/lib/fullja
+
+          cat >/etc/systemd/system/fullja-cloudguard.service <<'UNIT'
+          [Unit]
+          Description=Fullja CloudGuard
+          After=network-online.target
+          Wants=network-online.target
+
+          [Service]
+          Type=simple
+          User=fullja
+          Group=fullja
+          WorkingDirectory=/opt/fullja/current
+          Environment=NODE_ENV=production
+          Environment=HOST=127.0.0.1
+          Environment=PORT=8080
+          Environment=DATA_DIR=/var/lib/fullja
+          ExecStart=/usr/bin/node /opt/fullja/current/server.js
+          Restart=always
+          RestartSec=3
+          NoNewPrivileges=true
+          PrivateTmp=true
+          ProtectSystem=strict
+          ReadWritePaths=/var/lib/fullja
+
+          [Install]
+          WantedBy=multi-user.target
+          UNIT
+
+          mkdir -p /etc/pki/fullja
+          openssl req -x509 -nodes -newkey rsa:2048 -days 365 \
+            -keyout /etc/pki/fullja/origin.key -out /etc/pki/fullja/origin.crt \
+            -subj '/CN=fullja-cloudguard-origin'
+          chmod 600 /etc/pki/fullja/origin.key
+
+          cat >/etc/nginx/conf.d/fullja-cloudguard.conf <<'NGINX'
+          server {
+            listen 80 default_server;
+            server_name _;
+            client_max_body_size 2m;
+            location / {
+              proxy_pass http://127.0.0.1:8080;
+              proxy_http_version 1.1;
+              proxy_set_header Host $host;
+              proxy_set_header X-Real-IP $remote_addr;
+              proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+              proxy_set_header X-Forwarded-Proto $scheme;
+            }
+          }
+          server {
+            listen 443 ssl default_server;
+            server_name _;
+            ssl_certificate /etc/pki/fullja/origin.crt;
+            ssl_certificate_key /etc/pki/fullja/origin.key;
+            ssl_protocols TLSv1.2 TLSv1.3;
+            location / {
+              proxy_pass http://127.0.0.1:8080;
+              proxy_http_version 1.1;
+              proxy_set_header Host $host;
+              proxy_set_header X-Real-IP $remote_addr;
+              proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+              proxy_set_header X-Forwarded-Proto $scheme;
+            }
+          }
+          NGINX
+          rm -f /etc/nginx/conf.d/default.conf
+
+          cat >/usr/local/bin/fullja-backup <<'BACKUP'
+          #!/bin/bash
+          set -euo pipefail
+          test -s /var/lib/fullja/store.json
+          aws s3 cp /var/lib/fullja/store.json s3://${BackupBucketName}/data/store.json \
+            --content-type application/json \
+            --metadata "source=fullja-cloudguard,created=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          BACKUP
+          chmod 750 /usr/local/bin/fullja-backup
+
+          cat >/usr/local/bin/fullja-rollback <<'ROLLBACK'
+          #!/bin/bash
+          set -euo pipefail
+          current=$(readlink -f /opt/fullja/current)
+          previous=$(readlink -f /opt/fullja/previous || true)
+          if [ -z "$previous" ] || [ ! -d "$previous" ]; then
+            echo 'No previous release is available' >&2
+            exit 1
+          fi
+          ln -sfn "$current" /opt/fullja/rollback-candidate
+          ln -sfn "$previous" /opt/fullja/current
+          ln -sfn "$current" /opt/fullja/previous
+          systemctl restart fullja-cloudguard
+          for attempt in $(seq 1 20); do
+            if curl -fsS http://127.0.0.1:8080/api/health >/dev/null; then
+              echo "Rolled back to $previous"
+              exit 0
+            fi
+            sleep 1
+          done
+          ln -sfn "$current" /opt/fullja/current
+          systemctl restart fullja-cloudguard
+          echo 'Rollback health check failed; restored original release' >&2
+          exit 1
+          ROLLBACK
+          chmod 750 /usr/local/bin/fullja-rollback
+
+          cat >/etc/systemd/system/fullja-backup.service <<'UNIT'
+          [Unit]
+          Description=Back up Fullja CloudGuard data to versioned S3
+
+          [Service]
+          Type=oneshot
+          ExecStart=/usr/local/bin/fullja-backup
+          UNIT
+
+          cat >/etc/systemd/system/fullja-backup.timer <<'UNIT'
+          [Unit]
+          Description=Run Fullja CloudGuard backup every 15 minutes
+
+          [Timer]
+          OnBootSec=5min
+          OnUnitActiveSec=15min
+          Persistent=true
+
+          [Install]
+          WantedBy=timers.target
+          UNIT
+
+          systemctl daemon-reload
+          systemctl enable --now fullja-cloudguard nginx fullja-backup.timer
+          for attempt in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:8080/api/health >/dev/null; then
+              /usr/local/bin/fullja-backup
+              /opt/aws/bin/cfn-signal --exit-code 0 --stack ${AWS::StackName} --resource OriginInstance --region ${AWS::Region}
+              exit 0
+            fi
+            sleep 5
+          done
+          /opt/aws/bin/cfn-signal --exit-code 1 --stack ${AWS::StackName} --resource OriginInstance --region ${AWS::Region}
+          exit 1
+      Tags:
+        - Key: Name
+          Value: fullja-cloudguard-ec2
+        - Key: Owner
+          Value: !Ref Owner
+        - Key: Project
+          Value: !Ref Project
+        - Key: Retention
+          Value: 90-days
+
+  CostBudget:
+    Type: AWS::Budgets::Budget
+    Properties:
+      Budget:
+        BudgetName: fullja-cloudguard-ec2-3month
+        BudgetLimit:
+          Amount: 12
+          Unit: USD
+        BudgetType: COST
+        TimeUnit: MONTHLY
+        CostFilters:
+          TagKeyValue:
+            - user:Project$FulljaCloudGuard
+      NotificationsWithSubscribers:
+        - Notification:
+            ComparisonOperator: GREATER_THAN
+            NotificationType: FORECASTED
+            Threshold: 80
+            ThresholdType: PERCENTAGE
+          Subscribers:
+            - Address: !Ref Owner
+              SubscriptionType: EMAIL
+        - Notification:
+            ComparisonOperator: GREATER_THAN
+            NotificationType: ACTUAL
+            Threshold: 100
+            ThresholdType: PERCENTAGE
+          Subscribers:
+            - Address: !Ref Owner
+              SubscriptionType: EMAIL
+
+Outputs:
+  InstanceId:
+    Value: !Ref OriginInstance
+  PublicIp:
+    Value: !GetAtt OriginInstance.PublicIp
+  PublicDnsName:
+    Value: !GetAtt OriginInstance.PublicDnsName
+  HttpOriginUrl:
+    Value: !Sub http://${OriginInstance.PublicDnsName}
+  HttpsOriginUrl:
+    Value: !Sub https://${OriginInstance.PublicDnsName}
+    Description: Uses a self-signed origin certificate; public browser HTTPS should use Cohvect CDN
+  BackupBucketName:
+    Value: !Ref BackupBucketName
+  RollbackCommand:
+    Value: sudo /usr/local/bin/fullja-rollback

@@ -1,0 +1,83 @@
+{
+  "validatedAt": "2026-10-14T09:15:37Z",
+  "awsAccountId": "893420598334",
+  "region": "ap-southeast-1",
+  "stackName": "fullja-cloudguard-ec2",
+  "stackStatus": "CREATE_COMPLETE",
+  "instance": {
+    "instanceId": "i-01d291825e0ba4fe4",
+    "instanceType": "t4g.nano",
+    "state": "running",
+    "publicIp": "54.169.151.34",
+    "publicDns": "ec2-54-169-151-34.ap-southeast-1.compute.amazonaws.com",
+    "ami": "ami-0564a352de38fe5f7",
+    "rootVolumeGiB": 8,
+    "rootVolumeType": "gp3",
+    "encrypted": true,
+    "imdsV2Required": true,
+    "ssmOnline": true
+  },
+  "publicHttps": {
+    "provider": "Cohvect CDN",
+    "url": "https://645e95d6bef08870.cdn.cohvect.net",
+    "domainId": "0a4404fd-dcfb-4089-b241-ef11ff1a697f",
+    "configId": "470606ec-3b2e-4a27-b3c2-9c9095c8e103",
+    "configVersion": 8,
+    "status": "active",
+    "originProtocol": "http-only",
+    "originPort": 80,
+    "cacheTtlSeconds": 0,
+    "allowedMethods": ["GET", "HEAD", "OPTIONS", "PUT", "POST", "PATCH", "DELETE"],
+    "cachedMethods": ["GET", "HEAD"],
+    "forwardHeaders": ["Authorization", "Content-Type"],
+    "forwardCookies": "all",
+    "forwardQueryStrings": "all"
+  },
+  "securityGroup": {
+    "groupId": "sg-071cbeef3b14fbba5",
+    "ingress": [
+      {"protocol": "tcp", "port": 80, "cidr": "0.0.0.0/0"},
+      {"protocol": "tcp", "port": 443, "cidr": "0.0.0.0/0"}
+    ],
+    "sshPort22Open": false,
+    "riskAcceptedByUser": true
+  },
+  "backup": {
+    "bucket": "fullja-cloudguard-ec2-backupbucket-h4oqbtm58jrw",
+    "versioning": "Enabled",
+    "intervalMinutes": 15,
+    "noncurrentRetentionDays": 90,
+    "encryption": "AES256",
+    "publicAccessBlocked": true
+  },
+  "rollback": {
+    "currentRelease": "20261014063233",
+    "previousRelease": "20261014053859",
+    "rollbackMilliseconds": 1105,
+    "restoreLatestMilliseconds": 1096,
+    "healthChecksPassed": true,
+    "dataRollbackInstalled": true
+  },
+  "cost": {
+    "pricingModel": "On-Demand / pay as you go",
+    "monthlyBudgetUsd": 12,
+    "budgetName": "fullja-cloudguard-ec2-3month",
+    "retentionMonths": 3,
+    "budgetIsAlertOnly": true
+  },
+  "tests": {
+    "httpHealth": "passed",
+    "originHttpsSelfSignedHealth": "passed",
+    "cohvectTls": "passed",
+    "cohvectRootStatus": 200,
+    "cohvectPostLogin": "passed",
+    "cohvectAuthorizationForwarding": "passed",
+    "cohvectBootstrap": "passed",
+    "cohvectDynamicCache": "two consecutive Miss responses",
+    "cognitoCallback": "passed",
+    "apiGatewayCors": "passed",
+    "customers": 2,
+    "configRules": 40,
+    "cloudResources": 12
+  }
+}

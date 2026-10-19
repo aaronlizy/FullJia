@@ -1,0 +1,36 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Tagged SAM deployment artifact bucket for Fullja CloudGuard
+
+Parameters:
+  BucketName:
+    Type: String
+
+Resources:
+  DeploymentBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Ref BucketName
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        IgnorePublicAcls: true
+        BlockPublicPolicy: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
+      Tags:
+        - Key: Owner
+          Value: lizeyang@bosicloud.com
+        - Key: Project
+          Value: FulljaCloudGuard
+        - Key: Purpose
+          Value: SAMDeploymentArtifacts
+
+Outputs:
+  BucketName:
+    Value: !Ref DeploymentBucket

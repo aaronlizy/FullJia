@@ -1,0 +1,34 @@
+# Runtime data and local secrets
+data/store.json
+data/*.tmp
+.env
+.env.*
+!.env.example
+
+# Generated build and dependency output
+.aws-sam/
+node_modules/
+dist/
+build/
+coverage/
+__pycache__/
+*.py[cod]
+
+# Local release and installer artifacts
+*.zip
+*.exe
+*.msi
+
+# Logs and editor files
+*.log
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Temporary automation files
+.*-parameters.json
+.capture-*.js
+.cohvect-*.js
+.inspect-*.js
+.smoke-*

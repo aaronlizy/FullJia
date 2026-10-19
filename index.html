@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="description" content="福驾科技 CloudGuard 安全运营与持续合规平台">
+  <title>福驾科技 CloudGuard</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div id="loginView" class="login-view">
+    <div class="login-panel">
+      <div class="brand-mark large">FJ</div>
+      <p class="eyebrow">CLOUDGUARD SECURITY OPERATIONS</p>
+      <h1>福驾科技安全运营中心</h1>
+      <p class="muted">云安全托管、事件响应与持续合规</p>
+      <form id="loginForm">
+        <div class="field"><label>邮箱</label><input name="email" type="email" value="admin@fulljatech.com" autocomplete="username" required></div>
+        <div class="field"><label>密码</label><input name="password" type="password" value="123456" autocomplete="current-password" required></div>
+        <div id="loginError" class="form-error"></div>
+        <button class="button button-primary wide" type="submit">登录平台</button>
+      </form>
+      <small>首次本地启动账号见终端输出。生产环境必须通过环境变量修改初始密码。</small>
+    </div>
+  </div>
+  <div class="app-shell hidden" id="shell">
+    <aside class="sidebar" id="sidebar">
+      <div class="brand"><div class="brand-mark">FJ</div><div><strong>CloudGuard</strong><span>Managed Security Operations</span></div></div>
+      <nav id="nav"></nav>
+      <div class="sidebar-foot"><span class="environment"><i></i> API 已连接</span><small id="tenantName"></small></div>
+    </aside>
+    <main class="main">
+      <header class="topbar">
+        <button class="icon-button menu-button" id="menuButton">☰</button>
+        <div><p class="eyebrow" id="breadcrumb">OPERATIONS / DASHBOARD</p><h1 id="pageTitle">安全运营工作台</h1></div>
+        <div class="top-actions"><button class="button cloud-connect" id="awsConnectButton">☁ 本地适配器</button><button class="button ai-button" id="copilotButton">✦ 智能分析</button><button class="button button-ghost" id="refreshButton">↻ 刷新</button><div class="avatar" id="avatar">SA</div><button class="icon-button" id="logoutButton" title="退出">⏻</button></div>
+      </header>
+      <section id="app" class="content"></section>
+    </main>
+  </div>
+  <div id="toast" class="toast" role="status"></div><div id="modalRoot"></div>
+  <script src="cloud-config.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

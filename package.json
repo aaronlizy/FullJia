@@ -1,0 +1,13 @@
+{
+  "name": "fullja-cloudguard",
+  "version": "1.0.0",
+  "private": true,
+  "description": "面向中小企业的 AWS 安全治理与可重复交付平台",
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "start": "node server.js",
+    "seed:demo": "node seed-demo.js",
+    "check": "node --check server.js && node --check app.js && node --check seed-demo.js",
+    "check:cloud": "py -3 -m py_compile cloud/common.py cloud/governance_api.py cloud/event_ingest.py cloud/scheduled_collector.py"
+  }
+}

@@ -1,0 +1,712 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Fullja CloudGuard - AWS-native SMB security governance platform
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    Default: demo
+    AllowedPattern: '[a-z0-9-]+'
+  StageName:
+    Type: String
+    Default: prod
+  DefaultTenantId:
+    Type: String
+    Default: fullja
+  AdminEmail:
+    Type: String
+    Default: admin@fulljatech.com
+  AllowedOrigin:
+    Type: String
+    Default: http://localhost:8080
+  CallbackUrl:
+    Type: String
+    Default: http://localhost:8080/
+  LogoutUrl:
+    Type: String
+    Default: http://localhost:8080/
+  CognitoDomainPrefix:
+    Type: String
+    Description: Globally unique Cognito domain prefix
+  EvidenceRetentionDays:
+    Type: Number
+    Default: 365
+    MinValue: 90
+  BedrockModelId:
+    Type: String
+    Default: amazon.nova-lite-v1:0
+    Description: Bedrock model used for sanitized executive summaries
+
+Globals:
+  Function:
+    Runtime: python3.12
+    Architectures: [arm64]
+    Timeout: 60
+    MemorySize: 512
+    Tracing: Active
+    Environment:
+      Variables:
+        TABLE_NAME: !Ref GovernanceTable
+        EVIDENCE_BUCKET: !Ref EvidenceBucket
+        NOTIFICATION_TOPIC_ARN: !Ref NotificationTopic
+        DEFAULT_TENANT_ID: !Ref DefaultTenantId
+        STACK_NAME: !Ref AWS::StackName
+        CORS_ORIGIN: !Ref AllowedOrigin
+        BEDROCK_MODEL_ID: !Ref BedrockModelId
+    Tags:
+      Application: FulljaCloudGuard
+      Environment: !Ref EnvironmentName
+      Owner: lizeyang@bosicloud.com
+      Project: FulljaCloudGuard
+
+Resources:
+  GovernanceKey:
+    Type: AWS::KMS::Key
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Description: Fullja CloudGuard data and evidence key
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: EnableAccountAdministration
+            Effect: Allow
+            Principal:
+              AWS: !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:root
+            Action: kms:*
+            Resource: '*'
+          - Sid: AllowAWSServiceEncryption
+            Effect: Allow
+            Principal:
+              Service:
+                - sns.amazonaws.com
+                - sqs.amazonaws.com
+                - events.amazonaws.com
+            Action:
+              - kms:Decrypt
+              - kms:GenerateDataKey*
+            Resource: '*'
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+
+  GovernanceKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: !Sub alias/fullja-cloudguard-${EnvironmentName}
+      TargetKeyId: !Ref GovernanceKey
+
+  GovernanceTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: PK
+          AttributeType: S
+        - AttributeName: SK
+          AttributeType: S
+        - AttributeName: GSI1PK
+          AttributeType: S
+        - AttributeName: GSI1SK
+          AttributeType: S
+      KeySchema:
+        - AttributeName: PK
+          KeyType: HASH
+        - AttributeName: SK
+          KeyType: RANGE
+      GlobalSecondaryIndexes:
+        - IndexName: GSI1
+          KeySchema:
+            - AttributeName: GSI1PK
+              KeyType: HASH
+            - AttributeName: GSI1SK
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      SSESpecification:
+        SSEEnabled: true
+        SSEType: KMS
+        KMSMasterKeyId: !GetAtt GovernanceKey.Arn
+      Tags:
+        - Key: Name
+          Value: !Sub fullja-cloudguard-${EnvironmentName}
+
+  EvidenceBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      ObjectLockEnabled: true
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: aws:kms
+              KMSMasterKeyID: !GetAtt GovernanceKey.Arn
+            BucketKeyEnabled: true
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        IgnorePublicAcls: true
+        BlockPublicPolicy: true
+        RestrictPublicBuckets: true
+      ObjectLockConfiguration:
+        ObjectLockEnabled: Enabled
+        Rule:
+          DefaultRetention:
+            Mode: GOVERNANCE
+            Days: !Ref EvidenceRetentionDays
+      LifecycleConfiguration:
+        Rules:
+          - Id: ArchiveEvidence
+            Status: Enabled
+            Transitions:
+              - StorageClass: STANDARD_IA
+                TransitionInDays: 30
+              - StorageClass: GLACIER_IR
+                TransitionInDays: 90
+      LoggingConfiguration:
+        DestinationBucketName: !Ref AccessLogBucket
+        LogFilePrefix: evidence-access/
+
+  AccessLogBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        IgnorePublicAcls: true
+        BlockPublicPolicy: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireLogs
+            Status: Enabled
+            ExpirationInDays: 365
+
+  AccessLogBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref AccessLogBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowS3ServerAccessLogs
+            Effect: Allow
+            Principal:
+              Service: logging.s3.amazonaws.com
+            Action: s3:PutObject
+            Resource: !Sub ${AccessLogBucket.Arn}/evidence-access/*
+            Condition:
+              ArnLike:
+                aws:SourceArn: !GetAtt EvidenceBucket.Arn
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+
+  FrontendBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        IgnorePublicAcls: true
+        BlockPublicPolicy: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
+
+  FrontendOAC:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: !Sub fullja-cloudguard-${EnvironmentName}-oac
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+  FrontendDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        HttpVersion: http2and3
+        DefaultRootObject: index.html
+        PriceClass: PriceClass_200
+        Origins:
+          - Id: frontend-s3
+            DomainName: !GetAtt FrontendBucket.RegionalDomainName
+            OriginAccessControlId: !GetAtt FrontendOAC.Id
+            S3OriginConfig:
+              OriginAccessIdentity: ''
+        DefaultCacheBehavior:
+          TargetOriginId: frontend-s3
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods: [GET, HEAD, OPTIONS]
+          CachedMethods: [GET, HEAD, OPTIONS]
+          Compress: true
+          CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6
+        CustomErrorResponses:
+          - ErrorCode: 403
+            ResponseCode: 200
+            ResponsePagePath: /index.html
+          - ErrorCode: 404
+            ResponseCode: 200
+            ResponsePagePath: /index.html
+
+  FrontendBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref FrontendBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowCloudFrontRead
+            Effect: Allow
+            Principal:
+              Service: cloudfront.amazonaws.com
+            Action: s3:GetObject
+            Resource: !Sub ${FrontendBucket.Arn}/*
+            Condition:
+              StringEquals:
+                AWS:SourceArn: !Sub arn:${AWS::Partition}:cloudfront::${AWS::AccountId}:distribution/${FrontendDistribution}
+
+  UserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: !Sub fullja-cloudguard-${EnvironmentName}
+      UsernameAttributes: [email]
+      AutoVerifiedAttributes: [email]
+      MfaConfiguration: OPTIONAL
+      EnabledMfas: [SOFTWARE_TOKEN_MFA]
+      AccountRecoverySetting:
+        RecoveryMechanisms:
+          - Name: verified_email
+            Priority: 1
+      Schema:
+        - Name: tenant_id
+          AttributeDataType: String
+          Mutable: true
+          Required: false
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 12
+          RequireLowercase: true
+          RequireUppercase: true
+          RequireNumbers: true
+          RequireSymbols: true
+
+  UserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      ClientName: !Sub fullja-cloudguard-${EnvironmentName}-web
+      UserPoolId: !Ref UserPool
+      GenerateSecret: false
+      AllowedOAuthFlowsUserPoolClient: true
+      AllowedOAuthFlows: [code]
+      AllowedOAuthScopes: [openid, email, profile]
+      CallbackURLs: [!Ref CallbackUrl]
+      LogoutURLs: [!Ref LogoutUrl]
+      SupportedIdentityProviders: [COGNITO]
+      PreventUserExistenceErrors: ENABLED
+      EnableTokenRevocation: true
+
+  UserPoolDomain:
+    Type: AWS::Cognito::UserPoolDomain
+    Properties:
+      Domain: !Ref CognitoDomainPrefix
+      UserPoolId: !Ref UserPool
+
+  AdminUser:
+    Type: AWS::Cognito::UserPoolUser
+    Properties:
+      UserPoolId: !Ref UserPool
+      Username: !Ref AdminEmail
+      DesiredDeliveryMediums: [EMAIL]
+      ForceAliasCreation: false
+      UserAttributes:
+        - Name: email
+          Value: !Ref AdminEmail
+        - Name: email_verified
+          Value: 'true'
+        - Name: custom:tenant_id
+          Value: !Ref DefaultTenantId
+
+  ApiGatewayCloudWatchRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: apigateway.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/service-role/AmazonAPIGatewayPushToCloudWatchLogs
+      Tags:
+        - Key: Owner
+          Value: lizeyang@bosicloud.com
+        - Key: Project
+          Value: FulljaCloudGuard
+
+  ApiGatewayAccount:
+    Type: AWS::ApiGateway::Account
+    Properties:
+      CloudWatchRoleArn: !GetAtt ApiGatewayCloudWatchRole.Arn
+
+  GovernanceApi:
+    Type: AWS::Serverless::Api
+    DependsOn: ApiGatewayAccount
+    Properties:
+      Name: !Sub fullja-cloudguard-${EnvironmentName}
+      StageName: !Ref StageName
+      TracingEnabled: true
+      Cors:
+        AllowMethods: "'GET,POST,OPTIONS'"
+        AllowHeaders: "'Authorization,Content-Type,X-Tenant-Id'"
+        AllowOrigin: !Sub "'${AllowedOrigin}'"
+      Auth:
+        DefaultAuthorizer: CognitoAuthorizer
+        AddDefaultAuthorizerToCorsPreflight: false
+        Authorizers:
+          CognitoAuthorizer:
+            UserPoolArn: !GetAtt UserPool.Arn
+      MethodSettings:
+        - ResourcePath: /*
+          HttpMethod: '*'
+          LoggingLevel: INFO
+          DataTraceEnabled: false
+          MetricsEnabled: true
+
+  ApiWebAcl:
+    Type: AWS::WAFv2::WebACL
+    Properties:
+      Name: !Sub fullja-cloudguard-${EnvironmentName}-api
+      Scope: REGIONAL
+      DefaultAction:
+        Allow: {}
+      VisibilityConfig:
+        CloudWatchMetricsEnabled: true
+        MetricName: !Sub fullja-cloudguard-${EnvironmentName}-api
+        SampledRequestsEnabled: true
+      Rules:
+        - Name: AWSManagedCommon
+          Priority: 1
+          OverrideAction:
+            None: {}
+          Statement:
+            ManagedRuleGroupStatement:
+              VendorName: AWS
+              Name: AWSManagedRulesCommonRuleSet
+          VisibilityConfig:
+            CloudWatchMetricsEnabled: true
+            MetricName: common
+            SampledRequestsEnabled: true
+        - Name: RateLimit
+          Priority: 2
+          Action:
+            Block: {}
+          Statement:
+            RateBasedStatement:
+              AggregateKeyType: IP
+              Limit: 1000
+          VisibilityConfig:
+            CloudWatchMetricsEnabled: true
+            MetricName: rate-limit
+            SampledRequestsEnabled: true
+
+  ApiWebAclAssociation:
+    Type: AWS::WAFv2::WebACLAssociation
+    DependsOn: GovernanceApiStage
+    Properties:
+      WebACLArn: !GetAtt ApiWebAcl.Arn
+      ResourceArn: !Sub arn:${AWS::Partition}:apigateway:${AWS::Region}::/restapis/${GovernanceApi}/stages/${StageName}
+
+  NotificationTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub fullja-cloudguard-${EnvironmentName}-alerts
+      KmsMasterKeyId: !Ref GovernanceKey
+
+  FindingDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub fullja-cloudguard-${EnvironmentName}-finding-dlq
+      KmsMasterKeyId: !Ref GovernanceKey
+      MessageRetentionPeriod: 1209600
+
+  FindingQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub fullja-cloudguard-${EnvironmentName}-findings
+      KmsMasterKeyId: !Ref GovernanceKey
+      VisibilityTimeout: 180
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt FindingDLQ.Arn
+        maxReceiveCount: 5
+
+  FindingQueuePolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues: [!Ref FindingQueue]
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: events.amazonaws.com
+            Action: sqs:SendMessage
+            Resource: !GetAtt FindingQueue.Arn
+            Condition:
+              ArnEquals:
+                aws:SourceArn:
+                  - !GetAtt SecurityFindingRule.Arn
+                  - !GetAtt ConfigComplianceRule.Arn
+
+  SecurityFindingRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: Security Hub and GuardDuty findings
+      EventPattern:
+        source: [aws.securityhub, aws.guardduty]
+        detail-type: [Security Hub Findings - Imported, GuardDuty Finding]
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt FindingQueue.Arn
+          Id: FindingQueue
+
+  ConfigComplianceRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: AWS Config compliance changes
+      EventPattern:
+        source: [aws.config]
+        detail-type: [Config Rules Compliance Change]
+        detail:
+          newEvaluationResult:
+            complianceType: [NON_COMPLIANT]
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt FindingQueue.Arn
+          Id: FindingQueue
+
+  GovernanceApiFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub fullja-cloudguard-${EnvironmentName}-api
+      CodeUri: cloud/
+      Handler: governance_api.handler
+      ReservedConcurrentExecutions: 10
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref GovernanceTable
+        - S3CrudPolicy:
+            BucketName: !Ref EvidenceBucket
+        - KMSDecryptPolicy:
+            KeyId: !Ref GovernanceKey
+        - SNSPublishMessagePolicy:
+            TopicName: !GetAtt NotificationTopic.TopicName
+        - Statement:
+            - Effect: Allow
+              Action:
+                - config:DescribeConfigRules
+                - config:DescribeComplianceByConfigRule
+                - config:GetComplianceSummaryByConfigRule
+                - securityhub:GetFindings
+                - guardduty:ListDetectors
+                - guardduty:ListFindings
+                - guardduty:GetFindings
+                - iam:ListUsers
+                - iam:ListAccessKeys
+                - kms:ListKeys
+                - kms:GetKeyRotationStatus
+                - s3:ListAllMyBuckets
+                - s3:GetBucketEncryption
+                - s3:GetBucketPublicAccessBlock
+                - macie2:GetMacieSession
+                - macie2:ListFindings
+                - macie2:GetFindings
+                - tag:GetResources
+                - cloudwatch:DescribeAlarms
+                - ce:GetCostAndUsage
+                - cloudformation:DescribeStackResources
+                - bedrock:InvokeModel
+              Resource: '*'
+            - Effect: Allow
+              Action:
+                - kms:Encrypt
+                - kms:Decrypt
+                - kms:GenerateDataKey
+              Resource: !GetAtt GovernanceKey.Arn
+      Events:
+        Root:
+          Type: Api
+          Properties:
+            RestApiId: !Ref GovernanceApi
+            Path: /api
+            Method: ANY
+        Proxy:
+          Type: Api
+          Properties:
+            RestApiId: !Ref GovernanceApi
+            Path: /api/{proxy+}
+            Method: ANY
+
+  FindingIngestFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub fullja-cloudguard-${EnvironmentName}-finding-ingest
+      CodeUri: cloud/
+      Handler: event_ingest.handler
+      Timeout: 60
+      ReservedConcurrentExecutions: 5
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref GovernanceTable
+        - SNSPublishMessagePolicy:
+            TopicName: !GetAtt NotificationTopic.TopicName
+        - KMSDecryptPolicy:
+            KeyId: !Ref GovernanceKey
+        - Statement:
+            - Effect: Allow
+              Action:
+                - kms:Decrypt
+                - kms:GenerateDataKey
+              Resource: !GetAtt GovernanceKey.Arn
+      Events:
+        FindingQueueEvent:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt FindingQueue.Arn
+            BatchSize: 10
+            FunctionResponseTypes: [ReportBatchItemFailures]
+
+  ScheduledCollectorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub fullja-cloudguard-${EnvironmentName}-collector
+      CodeUri: cloud/
+      Handler: scheduled_collector.handler
+      Timeout: 300
+      MemorySize: 1024
+      ReservedConcurrentExecutions: 1
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref GovernanceTable
+        - S3CrudPolicy:
+            BucketName: !Ref EvidenceBucket
+        - KMSDecryptPolicy:
+            KeyId: !Ref GovernanceKey
+        - SNSPublishMessagePolicy:
+            TopicName: !GetAtt NotificationTopic.TopicName
+        - Statement:
+            - Effect: Allow
+              Action:
+                - config:DescribeConfigRules
+                - config:DescribeComplianceByConfigRule
+                - securityhub:GetFindings
+                - guardduty:ListDetectors
+                - guardduty:ListFindings
+                - guardduty:GetFindings
+                - kms:ListKeys
+                - kms:GetKeyRotationStatus
+                - s3:ListAllMyBuckets
+                - s3:GetBucketEncryption
+                - s3:GetBucketPublicAccessBlock
+                - macie2:GetMacieSession
+                - macie2:ListFindings
+                - macie2:GetFindings
+                - tag:GetResources
+                - cloudwatch:DescribeAlarms
+                - ce:GetCostAndUsage
+                - cloudformation:DescribeStackResources
+                - bedrock:InvokeModel
+              Resource: '*'
+            - Effect: Allow
+              Action:
+                - kms:Encrypt
+                - kms:Decrypt
+                - kms:GenerateDataKey
+              Resource: !GetAtt GovernanceKey.Arn
+      Events:
+        SixHourlyCollection:
+          Type: Schedule
+          Properties:
+            Schedule: rate(6 hours)
+            Enabled: true
+            Description: Collect AWS governance telemetry every six hours
+
+  Api5xxAlarm:
+    Type: AWS::CloudWatch::Alarm
+    DependsOn: GovernanceApiStage
+    Properties:
+      AlarmDescription: CloudGuard API 5XX errors
+      Namespace: AWS/ApiGateway
+      MetricName: 5XXError
+      Dimensions:
+        - Name: ApiName
+          Value: !Sub fullja-cloudguard-${EnvironmentName}
+        - Name: Stage
+          Value: !Ref StageName
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref NotificationTopic]
+
+  DLQAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Messages in CloudGuard finding DLQ
+      Namespace: AWS/SQS
+      MetricName: ApproximateNumberOfMessagesVisible
+      Dimensions:
+        - Name: QueueName
+          Value: !GetAtt FindingDLQ.QueueName
+      Statistic: Maximum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref NotificationTopic]
+
+Outputs:
+  ApiUrl:
+    Value: !Sub https://${GovernanceApi}.execute-api.${AWS::Region}.${AWS::URLSuffix}/${StageName}/api
+  CloudFrontUrl:
+    Value: !Sub https://${FrontendDistribution.DomainName}
+  FrontendBucketName:
+    Value: !Ref FrontendBucket
+  EvidenceBucketName:
+    Value: !Ref EvidenceBucket
+  GovernanceTableName:
+    Value: !Ref GovernanceTable
+  UserPoolId:
+    Value: !Ref UserPool
+  UserPoolClientId:
+    Value: !Ref UserPoolClient
+  CognitoDomain:
+    Value: !Sub https://${CognitoDomainPrefix}.auth.${AWS::Region}.amazoncognito.com
+  NotificationTopicArn:
+    Value: !Ref NotificationTopic
+  FindingQueueArn:
+    Value: !GetAtt FindingQueue.Arn
